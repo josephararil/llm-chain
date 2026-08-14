@@ -1,0 +1,31 @@
+name: tests
+
+# The suite is fully offline: it monkeypatches requests.post and time.sleep, so it
+# needs no secrets, no API key and no network. That is why this workflow can run on
+# every push and every PR, including from a fork, without exposing anything.
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        # The floor declared in pyproject.toml (requires-python >= 3.10) and the
+        # version the consumer pipelines actually run on in CI.
+        python-version: ["3.10", "3.12"]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+      - run: pip install -e .
+      - run: python test_llm_chain.py
+      # Proves the packaging claim, not just the code: one top-level module that is
+      # importable as `llm_chain` and runnable as `python -m llm_chain`. Run from a
+      # different directory so the repo checkout cannot satisfy the import via cwd.
+      - name: Verify the installed module imports as a top-level module
+        run: cd /tmp && python -c "import llm_chain; print(llm_chain.DEFAULT_MODEL_CHAIN)"
