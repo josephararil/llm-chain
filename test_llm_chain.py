@@ -36,6 +36,12 @@ def gemini_ok(text="answer", finish="STOP"):
         {"content": {"parts": [{"text": text}]}, "finishReason": finish}]})
 
 
+def gemini_grounded(text="leads", chunks=None):
+    return FakeResponse(200, {"candidates": [
+        {"content": {"parts": [{"text": text}]}, "finishReason": "STOP",
+         "groundingMetadata": {"groundingChunks": chunks if chunks is not None else []}}]})
+
+
 def err(status, text="upstream error", headers=None):
     return FakeResponse(status, {}, text, headers)
 
@@ -293,6 +299,73 @@ class TestSearch(ChainTest):
         res = llm_chain.call_llm("p")
         self.assertTrue(res.ok)
         self.assertTrue(res.truncated)
+
+
+# ------------------------------ grounding sources ------------------------------
+
+A = {"uri": "https://vertexaisearch.cloud.google.com/grounding-api-redirect/AAA", "title": "pptheatre.com"}
+B = {"uri": "https://vertexaisearch.cloud.google.com/grounding-api-redirect/BBB", "title": "plovdiv.bg"}
+
+
+class TestSources(ChainTest):
+
+    def test_sources_from_search_grounding_chunks(self):
+        self.chain(MODEL_A, LLM_ATTEMPTS_PER_MODEL=1)
+        search = gemini_grounded(chunks=[{"web": A}, {"retrievedContext": {"uri": "x"}}, {"web": B}])
+        self.install(lambda url, body, i: search if is_search(body) else gemini_ok("x"))
+        res = llm_chain.call_llm("p", want_search=True)
+        self.assertTrue(res.ok)
+        self.assertTrue(res.grounded)
+        self.assertEqual(res.sources, [A, B])
+
+    def test_sources_ignore_reasoning_metadata(self):
+        # SEARCH-RESPONSE-ONLY: the reasoning call is tools-free, so any grounding metadata
+        # on it is not what the search step saw.
+        self.chain(MODEL_A, LLM_ATTEMPTS_PER_MODEL=1)
+        search = gemini_grounded(chunks=[{"web": A}])
+        reason = gemini_grounded("x", chunks=[{"web": {"uri": "u", "title": "wrong.example"}}])
+        self.install(lambda url, body, i: search if is_search(body) else reason)
+        self.assertEqual(llm_chain.call_llm("p", want_search=True).sources, [A])
+        self.assertEqual(llm_chain.call_llm("p", want_search=False).sources, [])
+
+    def test_sources_empty_when_search_fails(self):
+        self.chain(MODEL_A, LLM_ATTEMPTS_PER_MODEL=1)
+        self.install(lambda url, body, i: err(503) if is_search(body) else gemini_ok("x"))
+        res = llm_chain.call_llm("p", want_search=True)
+        self.assertTrue(res.ok)
+        self.assertFalse(res.grounded)
+        self.assertEqual(res.sources, [])
+
+    def test_malformed_grounding_metadata_yields_empty_sources(self):
+        # NEVER-RAISES: bad metadata must not turn a good answer into a failure.
+        self.chain(MODEL_A, LLM_ATTEMPTS_PER_MODEL=1)
+        search = FakeResponse(200, {"candidates": [
+            {"content": {"parts": [{"text": "leads"}]}, "finishReason": "STOP",
+             "groundingMetadata": {"groundingChunks": "oops"}}]})
+        self.install(lambda url, body, i: search if is_search(body) else gemini_ok("x"))
+        res = llm_chain.call_llm("p", want_search=True)
+        self.assertTrue(res.ok)
+        self.assertTrue(res.grounded)
+        self.assertEqual(res.sources, [])
+        # "oops" iterates as characters and never reaches the except; a list-shaped
+        # groundingMetadata raises AttributeError on .get, which is what guards the try.
+        search._body["candidates"][0]["groundingMetadata"] = ["oops"]
+        res = llm_chain.call_llm("p", want_search=True)
+        self.assertTrue(res.ok)
+        self.assertEqual(res.sources, [])
+
+    def test_anthropic_sources_always_empty(self):
+        self.chain(MODEL_A, LLM_ATTEMPTS_PER_MODEL=1)
+        self.install(seq([FakeResponse(200, {"content": [{"type": "text", "text": "ok"}],
+                                             "stop_reason": "end_turn"})]))
+        res = llm_chain.call_llm("p", want_search=True, provider="anthropic")
+        self.assertTrue(res.ok)
+        self.assertEqual(res.sources, [])
+
+    def test_sources_default_not_shared(self):
+        a, b = llm_chain.LLMResult(), llm_chain.LLMResult()
+        a.sources.append(A)
+        self.assertEqual(b.sources, [])
 
 
 # ------------------------------ ported behaviour ------------------------------

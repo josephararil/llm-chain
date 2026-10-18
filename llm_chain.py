@@ -62,6 +62,7 @@ class LLMResult:
     truncated: bool = False  # True iff finishReason != "STOP"
     attempts:  int  = 0      # total HTTP requests made, across all models
     error:     str  = ""     # last failure summary; "" when ok
+    sources:   typing.List[typing.Dict[str, str]] = dataclasses.field(default_factory=list)  # [{"uri","title"}] from Gemini search grounding; [] otherwise
 
 
 # ------------------------------ Environment ------------------------------
@@ -187,6 +188,7 @@ class _Outcome:
     truncated: bool = False
     attempts:  int  = 0
     error:     str  = ""
+    response:  typing.Any = None   # the successful requests.Response; None otherwise
 
 
 def _log(stage, msg):
@@ -250,7 +252,7 @@ def _run_chain(models, build, extract, stage, provider, cfg):
                                     f"ok, {len(text)} chars"
                                     + (" (TRUNCATED)" if truncated else ""))
                         return _Outcome(text=text, ok=True, model=model, fell_back=idx > 0,
-                                        truncated=truncated, attempts=attempts)
+                                        truncated=truncated, attempts=attempts, response=r)
                     # 2xx with no text is not covered by the status table. Retrying the same
                     # model cannot help (an empty body is usually a token-budget or safety
                     # outcome, not congestion), so advance and give the next model a turn.
@@ -302,6 +304,20 @@ def _gemini_extract(r):
     return "".join(parts).strip(), bool(finish) and finish != "STOP"
 
 
+def _gemini_sources(r):
+    """[{"uri", "title"}] from a search response's groundingMetadata.groundingChunks, in
+    chunk order, duplicates kept. uri is normally a vertexaisearch.cloud.google.com
+    redirect (it 302s to the real page); title is normally the bare source domain.
+    Chunks without a `web` entry are skipped. Never raises: malformed metadata -> []."""
+    try:
+        cand = (r.json().get("candidates") or [{}])[0]
+        chunks = (cand.get("groundingMetadata") or {}).get("groundingChunks") or []
+        return [{"uri": str(ch["web"].get("uri", "")), "title": str(ch["web"].get("title", ""))}
+                for ch in chunks if isinstance(ch, dict) and isinstance(ch.get("web"), dict)]
+    except (AttributeError, TypeError, ValueError, IndexError, KeyError):
+        return []
+
+
 def _gemini(prompt, stage, max_tokens, want_search, search_prompt, search_preamble,
             response_schema, cfg):
     """Search and reasoning are split across two chains. Grounding runs on the search
@@ -313,6 +329,7 @@ def _gemini(prompt, stage, max_tokens, want_search, search_prompt, search_preamb
     headers = {"x-goog-api-key": key, "Content-Type": "application/json"}
     text = prompt
     grounded = False
+    sources = []
     search_attempts = 0
 
     if want_search:
@@ -337,6 +354,7 @@ def _gemini(prompt, stage, max_tokens, want_search, search_prompt, search_preamb
             # .replace, never .format -- grounding routinely contains braces.
             text = preamble.replace("{leads}", out.text) + prompt
             grounded = True
+            sources = _gemini_sources(out.response)
         else:
             # Search failure degrades to knowledge-only reasoning; it is NOT a call failure.
             _log(stage, f"search grounding unavailable ({out.error}); reasoning knowledge-only")
@@ -354,7 +372,8 @@ def _gemini(prompt, stage, max_tokens, want_search, search_prompt, search_preamb
     out = _run_chain(cfg["model_chain"], build_reason, _gemini_extract, stage, "gemini", cfg)
     return LLMResult(text=out.text, ok=out.ok, model=out.model, provider="gemini",
                      fell_back=out.fell_back, grounded=grounded, truncated=out.truncated,
-                     attempts=search_attempts + out.attempts, error=out.error)
+                     attempts=search_attempts + out.attempts, error=out.error,
+                     sources=sources)
 
 
 # ------------------------------ Anthropic ------------------------------
