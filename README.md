@@ -81,7 +81,12 @@ data = L.parse_json_block(res.text)
 `LLMResult` fields: `text`, `ok`, `model` (which model actually answered), `provider`,
 `fell_back` (the first model in the chain did **not** answer), `grounded` (search was
 injected), `truncated` (`finishReason != "STOP"`), `attempts` (total HTTP requests across
-all models), `error`.
+all models), `error`, `sources` (a list of `{"uri", "title"}` dicts from Gemini's search
+grounding, in chunk order, duplicates kept; `[]` when the call was not grounded, when
+grounding returned no chunks, and always on the Anthropic path). `uri` is a
+`vertexaisearch.cloud.google.com` redirect, not the page itself; `title` is normally the
+bare source domain (observed on 21 of 21 chunks across `gemini-flash-latest` and
+`gemini-3.1-flash-lite`, 2026-10-18), so read `title` when you want the domain.
 
 Two of these are worth acting on rather than logging. `truncated` means `max_tokens` cut
 the answer off mid-JSON — which looks downstream like the model simply found nothing.
@@ -192,7 +197,7 @@ consumers migrate one at a time — never a moved `v1`.
 ## Tests
 
 ```bash
-python test_llm_chain.py     # 17 tests, fully offline
+python test_llm_chain.py     # 23 tests, fully offline
 ```
 
 Fully offline: `requests.post` and `time.sleep` are both monkeypatched, and sleeps are

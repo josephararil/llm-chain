@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "llm-chain"
-version = "1.0.0"
+version = "1.1.0"
 description = "Provider-agnostic LLM calls with a cross-model fallback chain, retry policy and wall-clock budget valve."
 readme = "README.md"
 requires-python = ">=3.10"
